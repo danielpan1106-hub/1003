@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNC 智慧派工系統</title>
+<script>document.documentElement.classList.add("js")</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="nav">
+  <div class="wrap navin">
+    <span class="logo"><i></i>CNC Dispatch</span>
+    <nav><a href="#import">匯入資料</a><a href="#rules">排程規則</a><a href="#results">派工結果</a></nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap heroin">
+    <div class="herotxt">
+      <p class="eyebrow">AEROSPACE CNC SCHEDULING</p>
+      <h1>CNC 智慧派工系統</h1>
+      <p class="lead">依人員技能、班表、機台占用、換線與交接時間，自動篩選人員與機台並派工；長工單可跨班接力，空檔自動安排間接工作。</p>
+      <div class="cta">
+        <a class="btn primary" href="#import">開始派工</a>
+        <a class="btn" href="#rules">查看排程規則</a>
+      </div>
+    </div>
+    <div class="art" aria-hidden="true"><span class="blk b1"></span><span class="blk b2"></span><span class="blk b3"></span><span class="blk b4"></span><span class="ring"></span></div>
+  </div>
+  <div class="wrap points">
+    <div><b>技能比對</b><span>八種工種與機台類型，只派給符合技能的人</span></div>
+    <div><b>班表與接力</b><span>早、中、夜班各自休息時間，跨班接力、必要時加班</span></div>
+    <div><b>直接與間接工時</b><span>換線與保養、維護等間接工作分開統計</span></div>
+  </div>
+</section>
+
+<main class="wrap">
+  <section class="card" id="import">
+    <div class="head">
+      <h2>① 匯入資料（CSV）</h2>
+      <div class="actions">
+        <button id="btnSample" class="primary">載入範例資料</button>
+        <button id="btnClear" class="ghost">清除全部</button>
+      </div>
+    </div>
+    <p class="hint">Excel 請「另存新檔 → CSV UTF-8（逗號分隔）」。日期 2026-10-05，時間 08:00，技能用「;」分隔。下班早於上班視為跨日（如 22:00–06:00）。工種＝機台類型＝人員技能（立式車床、臥式車床、Mazak五軸車銑、DMG五軸銑車、八米五軸龍門、三軸銑床、鉗工、鋸床）。</p>
+    <div class="grid4">
+      <div class="file" data-kind="employees">
+        <h3>人員與技能</h3>
+        <p class="cols">員編, 姓名, 技能</p>
+        <input type="file" accept=".csv,text/csv">
+        <a href="#" class="tpl">下載範本</a>
+        <div class="status">尚未匯入</div>
+        <details><summary>預覽</summary><div class="preview"></div></details>
+      </div>
+      <div class="file" data-kind="shifts">
+        <h3>班表</h3>
+        <p class="cols">員編, 日期, 班別, 上班, 下班</p>
+        <input type="file" accept=".csv,text/csv">
+        <a href="#" class="tpl">下載範本</a>
+        <div class="status">尚未匯入</div>
+        <details><summary>預覽</summary><div class="preview"></div></details>
+      </div>
+      <div class="file" data-kind="machines">
+        <h3>機台清單</h3>
+        <p class="cols">機台編號, 機台名稱, 類型</p>
+        <input type="file" accept=".csv,text/csv">
+        <a href="#" class="tpl">下載範本</a>
+        <div class="status">尚未匯入</div>
+        <details><summary>預覽</summary><div class="preview"></div></details>
+      </div>
+      <div class="file" data-kind="jobs">
+        <h3>工作排程（工單）</h3>
+        <p class="cols">工單, 名稱, 工種, 指定機台, 日期, 開始, 結束日期(跨日才填), 結束, 人數, 換線(分), 優先序</p>
+        <input type="file" accept=".csv,text/csv">
+        <a href="#" class="tpl">下載範本</a>
+        <div class="status">尚未匯入</div>
+        <details><summary>預覽</summary><div class="preview"></div></details>
+      </div>
+    </div>
+    <div id="messages"></div>
+  </section>
+
+  <section class="card" id="rules">
+    <div class="head"><h2>② 排程規則與工單設定</h2></div>
+    <div class="setrow" id="breakRows"></div>
+    <div class="setrow">
+      <label>預設換線時間 <select id="setSetup"></select></label>
+      <label>人員交接時間 <select id="setHandover"></select></label>
+      <label>每人每日工時上限 <select id="setCap"></select></label>
+      <label><input type="checkbox" id="setOT"> 允許加班（正常班排不下時才使用）</label>
+      <label><input type="checkbox" id="setFill"> 派工後，空檔自動安排間接工作</label>
+    </div>
+    <p class="hint">休息：依班別設定（每班最多 5 段），休息時間不計入人員工時，<b>機台照常運轉</b>。換線：每張工單加工前的準備時間，由人員執行，算<b>間接工時</b>，機台此時也被占用；機台實際加工中算<b>直接工時</b>。交接：跨班接力時，接班者須提前這麼多分鐘到場與前一位重疊；同一人前後兩張工單之間也需空出這段時間。工時上限：每人每個班表日期的實際工作時數（扣休息）上限；開啟加班時，班別之間有空檔，系統會讓前一位加班撐到下一班到場，但不超過上限。</p>
+    <details class="ind"><summary>間接工作設定（排不進工單的空檔會用這些工作填滿）</summary><div id="indRows"></div><button id="btnIndAdd">＋ 新增間接工作</button></details>
+    <div class="opts">
+      <label><input type="checkbox" id="optPrio" checked> 優先序高的工單先派（1–3，數字越大越優先）</label>
+      <label><input type="checkbox" id="optMulti" checked> 工時相同時，優先派技能較少的人（保留多技能人員應付難案）</label>
+    </div>
+    <div class="tblwrap jobsbox" id="jobsTbl"></div>
+    <div class="runrow">
+      <button id="btnRun" class="primary big" disabled>自動派工</button>
+      <span class="hint" id="runHint"></span>
+    </div>
+  </section>
+
+  <section class="card" id="results" hidden>
+    <div class="head">
+      <h2>③ 派工結果</h2>
+      <div class="actions"><button id="btnExport">匯出結果 CSV</button><button id="btnExport2">匯出人員明細 CSV</button></div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="tabs">
+      <button data-tab="list" class="on">派工清單</button>
+      <button data-tab="gantt">時間軸</button>
+      <button data-tab="ind">間接工作</button>
+      <button data-tab="load">人員／機台負荷</button>
+    </div>
+    <div class="tab" id="tab-list"></div>
+    <div class="tab" id="tab-gantt" hidden>
+      <div class="gbar">
+        <span>
+          <label>日期 <select id="ganttDate"></select></label>
+          <label>檢視 <select id="ganttView"><option value="emp">依人員</option><option value="mac">依機台</option></select></label>
+        </span>
+        <span class="legend"><i class="lg shift"></i>上班 <i class="lg lunch"></i>休息 <i class="lg ot"></i>可加班 <i class="lg setup"></i>換線（間接） <i class="lg ind"></i>間接工作 <i class="lg p3"></i>優先3 <i class="lg p2"></i>優先2 <i class="lg p1"></i>優先1</span>
+      </div>
+      <div id="gantt"></div>
+      <div id="ganttUn"></div>
+    </div>
+    <div class="tab" id="tab-ind" hidden></div>
+    <div class="tab" id="tab-load" hidden></div>
+  </section>
+</main>
+
+<footer class="wrap foot">資料只在你的瀏覽器內處理，不會上傳到任何伺服器。</footer>
+<script src="app.js"></script>
+</body>
+</html>
