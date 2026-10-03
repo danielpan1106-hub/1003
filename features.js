@@ -283,6 +283,46 @@ $('#tplDt').addEventListener('click', ev => {
   download('機台停機範本.csv', toCSV(SAMPLE.downtime.head, SAMPLE.downtime.rows));
 });
 
+/* ================= 測試資料（data/ 資料夾） ================= */
+let SCENARIOS = [];
+async function initScenarios() {
+  const sel = $('#scenario'), desc = $('#scenDesc');
+  try {
+    const r = await fetch('data/scenarios.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    SCENARIOS = await r.json();
+    sel.innerHTML = SCENARIOS.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+    const show = () => { const s = SCENARIOS.find(x => x.id === sel.value); desc.textContent = s ? s.desc : ''; };
+    sel.addEventListener('change', show); show();
+  } catch (e) {
+    sel.innerHTML = '<option value="">（無法讀取測試資料）</option>';
+    desc.textContent = '請用網站網址開啟（不是直接點開檔案）才能載入測試資料；仍可用「載入範例資料」。';
+  }
+}
+$('#btnScenario').addEventListener('click', async () => {
+  const s = SCENARIOS.find(x => x.id === $('#scenario').value); if (!s) return;
+  const btn = $('#btnScenario'), old = btn.textContent; btn.disabled = true; btn.textContent = '載入中…';
+  try {
+    const r = await fetch('data/' + s.file, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    for (const kind of KINDS) {
+      const x = build(kind, [d[kind].head, ...d[kind].rows.map(row => row.map(String))]);
+      state[kind] = x.items; state.warn[kind] = x.warn;
+    }
+    const dt = build('downtime', [d.downtime.head, ...d.downtime.rows.map(row => row.map(String))]);
+    state.downtime = dt.items; state.warn.downtime = dt.warn;
+    state.settings = defaults();
+    invalidate(); save(); renderImport();
+    $('#runHint').textContent = `已載入「${s.name}」，請按「自動派工」。`;
+    $('#rules').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) {
+    $('#messages').insertAdjacentHTML('beforeend', `<div class="msg">測試資料載入失敗：${esc(e.message)}</div>`);
+  }
+  btn.disabled = false; btn.textContent = old;
+});
+initScenarios();
+
 /* 匯入區的停機警告也顯示 */
 const _renderImport = renderImport;
 renderImport = function () {
