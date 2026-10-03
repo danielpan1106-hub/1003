@@ -32,7 +32,8 @@ const LABEL = { employees: '位人員', shifts: '筆班表', machines: '台機�
 
 const state = {
   employees: [], shifts: [], machines: [], jobs: [], settings: defaults(),
-  warn: { employees: [], shifts: [], machines: [], jobs: [] },
+  warn: { employees: [], shifts: [], machines: [], jobs: [], downtime: [] },
+  downtime: [], history: [], autoSnap: null, boardT: null, boardTimer: null,
   ctx: null, assign: null, indir: [], repair: { notes: [], tried: new Set() }, gDate: null, gView: 'emp',
 };
 
@@ -95,11 +96,21 @@ const SAMPLE = (() => {
     ['WO-1026', '治具五軸加工', 'DMG五軸銑車', 'DMG-02', c, '09:30', '', '14:30', 1, 45, 2],
     ['WO-1027', '夜間鉗工', '鉗工', '', d, '21:00', '', '23:30', 1, 10, 2],
   ];
+  const MACMAT = { 'GM-01': '鈦合金;鋁合金;鋼', 'DMG-01': '鈦合金;鋁合金', 'DMG-02': '鋁合金' };
+  const MAT = { 'WO-1001': '鈦合金', 'WO-1003': '鈦合金', 'WO-1009': '鈦合金', 'WO-1012': '鈦合金', 'WO-1013': '鈦合金', 'WO-1015': '鈦合金', 'WO-1021': '鈦合金', 'WO-1024': '鈦合金', 'WO-1026': '鋁合金' };
+  const FEMP = { 'WO-1003': 'E008', 'WO-1005': 'E003', 'WO-1014': 'E002' };
   return {
     employees: { head: ['員編', '姓名', '技能'], rows: emps.map(e => e.slice(0, 3)) },
     shifts: { head: ['員編', '日期', '班別', '上班', '下班'], rows: shifts },
-    machines: { head: ['機台編號', '機台名稱', '類型'], rows: mach },
-    jobs: { head: ['工單', '名稱', '工種', '指定機台', '日期', '開始', '結束日期', '結束', '人數', '換線(分)', '優先序'], rows: jobs },
+    machines: { head: ['機台編號', '機台名稱', '類型', '可加工材質'], rows: mach.map(m => [...m, MACMAT[m[0]] || '']) },
+    jobs: {
+      head: ['工單', '名稱', '工種', '材質', '指定機台', '指定人員', '日期', '開始', '結束日期', '結束', '人數', '換線(分)', '優先序'],
+      rows: jobs.map(r => [r[0], r[1], r[2], MAT[r[0]] || '', r[3], FEMP[r[0]] || '', r[4], r[5], r[6], r[7], r[8], r[9], r[10]]),
+    },
+    downtime: {
+      head: ['機台編號', '開始日期', '開始', '結束日期', '結束', '原因'],
+      rows: [['VM-01', a, '08:00', a, '12:00', '異常'], ['HL-01', b, '08:00', b, '11:00', '維護'], ['DMG-01', c, '13:00', c, '17:00', '維護']],
+    },
   };
 })();
 
@@ -110,12 +121,14 @@ function decodeBuffer(buf) {
 }
 function parseCSV(text) {
   text = text.replace(/^﻿/, '');
+  const first = text.split(/\r?\n/)[0] || '';
+  const delim = [',', ';', '\t'].map(d => [d, first.split(d).length]).sort((x, y) => y[1] - x[1])[0][0];
   const rows = []; let row = [], cell = '', q = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
     else if (c === '"') q = true;
-    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === delim) { row.push(cell); cell = ''; }
     else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cell); cell = ''; rows.push(row); row = []; }
     else cell += c;
   }
@@ -136,12 +149,13 @@ function download(name, text) {
 const SCHEMA = {
   employees: { required: ['id'], fields: { id: ['員編', '員工編號', '編號', 'ID'], name: ['姓名', '名稱', 'Name'], skills: ['技能', '技能清單', 'Skills'] } },
   shifts: { required: ['emp', 'date', 'start', 'end'], fields: { emp: ['員編', '員工編號', '編號', 'ID'], date: ['日期'], type: ['班別', '班次'], start: ['上班', '開始', '上班時間'], end: ['下班', '結束', '下班時間'] } },
-  machines: { required: ['id', 'type'], fields: { id: ['機台編號', '機台', '編號', 'ID'], name: ['機台名稱', '名稱'], type: ['類型', '機台類型', '工種'] } },
+  machines: { required: ['id', 'type'], fields: { id: ['機台編號', '機台', '編號', 'ID'], name: ['機台名稱', '名稱'], type: ['類型', '機台類型', '工種'], materials: ['可加工材質', '材質'] } },
+  downtime: { required: ['machine', 'date', 'start', 'end'], fields: { machine: ['機台編號', '機台'], date: ['開始日期', '日期'], start: ['開始', '開始時間'], edate: ['結束日期'], end: ['結束', '結束時間'], reason: ['原因', '類型'] } },
   jobs: {
     required: ['id', 'type', 'date', 'start', 'end'],
     fields: {
       id: ['工單', '工單編號', '工作編號'], name: ['名稱', '品名', '工作名稱', '說明'], type: ['工種', '機台類型', '類型', '所需技能', '技能'],
-      fixed: ['指定機台', '機台'], date: ['日期', '開始日期'], start: ['開始', '開始時間'], edate: ['結束日期', '完工日期'], end: ['結束', '結束時間'],
+      material: ['材質', '物料材質'], femp: ['指定人員', '指定員編'], fixed: ['指定機台', '機台'], date: ['日期', '開始日期'], start: ['開始', '開始時間'], edate: ['結束日期', '完工日期'], end: ['結束', '結束時間'],
       people: ['人數', '所需人數'], setup: ['換線(分)', '換線', '換線時間', '換線分鐘'], prio: ['優先序', '優先', '優先級'],
     },
   },
@@ -199,7 +213,7 @@ function build(kind, rows) {
     } else if (kind === 'machines') {
       if (!o.id || !o.type) return warn.push(`${L}：機台編號或類型空白，已略過`);
       if (seen.has(o.id)) return warn.push(`${L}：機台 ${o.id} 重複，已略過`);
-      seen.add(o.id); items.push({ id: o.id, name: o.name || o.id, type: o.type });
+      seen.add(o.id); items.push({ id: o.id, name: o.name || o.id, type: o.type, materials: splitSkills(o.materials) });
     } else {
       const date = normDate(o.date), st = normTime(o.start), en = normTime(o.end);
       if (!date || st == null || en == null) return warn.push(`${L}：日期或時間格式不正確，已略過`);
@@ -210,11 +224,14 @@ function build(kind, rows) {
       if (kind === 'shifts') {
         if (!o.emp) return warn.push(`${L}：員編空白，已略過`);
         items.push({ emp: o.emp, date, type: o.type || shiftTypeOf(st), start: st, end: en, s, e });
+      } else if (kind === 'downtime') {
+        if (!o.machine) return warn.push(`${L}：機台編號空白，已略過`);
+        items.push({ machine: o.machine, s, e, reason: o.reason || '維護' });
       } else {
         if (!o.id || !o.type) return warn.push(`${L}：工單編號或工種空白，已略過`);
         if (seen.has(o.id)) return warn.push(`${L}：工單 ${o.id} 重複，已略過`);
         seen.add(o.id);
-        items.push({ id: o.id, name: o.name || o.id, type: o.type, fixed: o.fixed, date, start: st, edate: edate || '', end: en, s, e, people: normPeople(o.people), setup: normSetup(o.setup), prio: normPrio(o.prio) });
+        items.push({ id: o.id, name: o.name || o.id, type: o.type, material: o.material, femp: o.femp, fixed: o.fixed, date, start: st, edate: edate || '', end: en, s, e, people: normPeople(o.people), setup: normSetup(o.setup), prio: normPrio(o.prio) });
       }
     }
   });
@@ -223,27 +240,28 @@ function build(kind, rows) {
 
 /* ---------- 儲存 ---------- */
 function save() {
-  try { localStorage.setItem('dispatch-v4', JSON.stringify({ e: state.employees, s: state.shifts, m: state.machines, j: state.jobs, c: state.settings })); } catch (e) { /* 忽略 */ }
+  try { localStorage.setItem('dispatch-v4', JSON.stringify({ e: state.employees, s: state.shifts, m: state.machines, j: state.jobs, d: state.downtime, c: state.settings })); } catch (e) { /* 忽略 */ }
 }
 function load() {
   try {
     const d = JSON.parse(localStorage.getItem('dispatch-v4') || 'null');
     if (d) {
-      state.employees = d.e || []; state.shifts = d.s || []; state.machines = d.m || []; state.jobs = d.j || [];
+      state.employees = d.e || []; state.shifts = d.s || []; state.machines = d.m || []; state.jobs = d.j || []; state.downtime = d.d || [];
       const df = defaults(), c = d.c || {};
       state.settings = { ...df, ...c, breaks: { ...df.breaks, ...(c.breaks || {}) }, indirect: Array.isArray(c.indirect) ? c.indirect : df.indirect };
     }
   } catch (e) { /* 忽略 */ }
 }
-function invalidate() { state.ctx = state.assign = null; state.indir = []; $('#results').hidden = true; }
+function invalidate() { state.ctx = state.assign = null; state.indir = []; state.history = []; state.autoSnap = null; clearInterval(state.boardTimer); state.boardTimer = null; $('#results').hidden = true; }
 
 /* ---------- 休息、加班與工時 ---------- */
 function breakWindows(type, s, e) {
   const out = [];
   for (const [bs0, be0] of state.settings.breaks[type] || []) {
-    const bs = normTime(bs0), be = normTime(be0);
-    if (bs == null || be == null || be <= bs) continue;
-    for (let d = Math.floor(s / 1440); d <= Math.floor((e - 1) / 1440); d++) {
+    const bs = normTime(bs0); let be = normTime(be0);
+    if (bs == null || be == null || be === bs) continue;
+    if (be < bs) be += 1440;                       // 跨午夜的休息，如 23:30–00:30
+    for (let d = Math.floor(s / 1440) - 1; d <= Math.floor((e - 1) / 1440); d++) {
       const a = Math.max(d * 1440 + bs, s), z = Math.min(d * 1440 + be, e);
       if (z > a) out.push([a, z]);
     }
@@ -293,9 +311,14 @@ function prepare() {
   return { emps, shiftsBy, machines: state.machines, jobs: state.jobs };
 }
 const skillOk = (e, j) => e.set.has(nk(j.type));
-const machinesFor = (ctx, j) => j.fixed ? ctx.machines.filter(m => m.id === j.fixed) : ctx.machines.filter(m => nk(m.type) === nk(j.type));
+const machinesRaw = (ctx, j) => j.fixed ? ctx.machines.filter(m => m.id === j.fixed) : ctx.machines.filter(m => nk(m.type) === nk(j.type));
+const matOk = (m, j) => !j.material || !(m.materials || []).length || m.materials.some(x => nk(x) === nk(j.material));
+const machinesFor = (ctx, j) => machinesRaw(ctx, j).filter(m => matOk(m, j));
+/* 機台停機／維護時段與工單（含換線）重疊則不可用 */
+const macDown = (m, j) => state.downtime.find(d => d.machine === m.id && d.s < j.e && wsOf(j) < d.e) || null;
 /* 機台占用 = 換線 + 加工，前後工單不可重疊 */
 const macClash = (ctx, m, j, A) => ctx.jobs.find(o => o !== j && A[o.id].machine === m.id && !(o.e <= wsOf(j) || j.e <= wsOf(o))) || null;
+const macBlocked = (ctx, m, j, A) => macClash(ctx, m, j, A) || macDown(m, j);
 
 function busyIndex(A, skip) {
   const m = new Map();
@@ -350,7 +373,7 @@ function extendSeg(ctx, g, R, busy) {
 
 /* 排出單一人力欄位的接力鏈：後一位提前「交接時間」到場與前一位重疊。
    ot=true 時，若班別之間有空檔，允許前一位加班撐到下一班到場。 */
-function planChain(j, ctx, busy, lE, multi, ot, added) {
+function planChain(j, ctx, busy, lE, multi, ot, added, k = 0) {
   const h = state.settings.handover, cands = ctx.emps.filter(e => skillOk(e, j));
   let t = wsOf(j), covered = t; const chain = [];
   while (t < j.e) {
@@ -359,7 +382,9 @@ function planChain(j, ctx, busy, lE, multi, ot, added) {
       let r = reachAt(freeIv(ctx, e.id, busy, false), t, j.e);
       if (r > t) r = capReach(ctx, e.id, t, r, busy);
       if (r <= t || (chain.length && r <= covered)) continue;
-      if (!best || r > best.r || (r === best.r && ((lE[e.id] || 0) - (lE[best.e.id] || 0) || (multi ? e.skills.length - best.e.skills.length : 0)) < 0)) best = { e, r };
+      const forced = k === 0 && !!j.femp && e.id === j.femp;   // 指定人員優先
+      const better = !best || (forced && !best.forced) || (!best.forced && !forced && (r > best.r || (r === best.r && ((lE[e.id] || 0) - (lE[best.e.id] || 0) || (multi ? e.skills.length - best.e.skills.length : 0)) < 0)));
+      if (better) best = { e, r, forced };
     }
     if (best) {
       const g = { emp: best.e.id, a: t, b: best.r };
@@ -380,14 +405,15 @@ function planChain(j, ctx, busy, lE, multi, ot, added) {
     if (R >= j.e) break;
     t = nextA;
   }
+  if (k === 0 && j.femp && !chain.some(g => g.emp === j.femp)) return { fail: { at: wsOf(j), femp: true } };
   return { chain };
 }
 function planSlots(j, ctx, busy, lE, multi, ot) {
   const slots = [], added = [];
   const undo = () => added.forEach(g => { const a = busy.get(g.emp); const i = a.indexOf(g); if (i >= 0) a.splice(i, 1); });
   for (let k = 0; k < j.people; k++) {
-    const r = planChain(j, ctx, busy, lE, multi, ot, added);
-    if (r.fail) { undo(); return { fail: { slot: k, at: r.fail.at } }; }
+    const r = planChain(j, ctx, busy, lE, multi, ot, added, k);
+    if (r.fail) { undo(); return { fail: { slot: k, at: r.fail.at, femp: r.fail.femp } }; }
     slots.push(r.chain);
   }
   return { slots, undo };
@@ -399,7 +425,7 @@ function repair(ctx, A, lE, multi, prio) {
   const ot = state.settings.ot, notes = [], tried = new Set();
   const failed = ctx.jobs.filter(j => !A[j.id].machine).sort((a, b) => (prio ? b.prio - a.prio : 0) || a.s - b.s);
   for (const j of failed) {
-    const macs = machinesFor(ctx, j).filter(m => !macClash(ctx, m, j, A));
+    const macs = machinesFor(ctx, j).filter(m => !macBlocked(ctx, m, j, A));
     if (!macs.length) continue;
     tried.add(j.id);
     const skilled = new Set(ctx.emps.filter(e => skillOk(e, j)).map(e => e.id));
@@ -413,8 +439,8 @@ function repair(ctx, A, lE, multi, prio) {
       let r = planSlots(j, ctx, busy, lE, multi, false);
       if (r.fail && ot) r = planSlots(j, ctx, busy, lE, multi, true);
       if (r.fail) { A[o.id].slots[k] = saved; continue; }
-      let c = planChain(o, ctx, busy, lE, multi, false, added);
-      if (c.fail && ot) c = planChain(o, ctx, busy, lE, multi, true, added);
+      let c = planChain(o, ctx, busy, lE, multi, false, added, k);
+      if (c.fail && ot) c = planChain(o, ctx, busy, lE, multi, true, added, k);
       if (c.fail) { A[o.id].slots[k] = saved; continue; }
       macs.sort((a, b) => a.id.localeCompare(b.id));
       A[j.id] = { machine: macs[0].id, slots: r.slots };
@@ -436,7 +462,7 @@ function runDispatch() {
   const order = ctx.jobs.map(j => ({ j, c: ctx.emps.filter(e => skillOk(e, j)).length - j.people }));
   order.sort((a, b) => (prio ? b.j.prio - a.j.prio : 0) || a.c - b.c || (b.j.e - wsOf(b.j)) - (a.j.e - wsOf(a.j)) || a.j.s - b.j.s);
   for (const { j } of order) {
-    const macs = machinesFor(ctx, j).filter(m => !macClash(ctx, m, j, A));
+    const macs = machinesFor(ctx, j).filter(m => !macBlocked(ctx, m, j, A));
     if (!macs.length) continue;
     let r = planSlots(j, ctx, busy, lE, multi, false);
     if (r.fail && state.settings.ot) r = planSlots(j, ctx, busy, lE, multi, true);
@@ -448,6 +474,7 @@ function runDispatch() {
   }
   const rp = repair(ctx, A, lE, multi, prio);
   state.repair = rp;
+  state.history = []; state.autoSnap = JSON.stringify(A);
 }
 
 const slotDone = (j, ch) => {
@@ -519,11 +546,15 @@ function computeIndirect() {
 
 function diag(j) {
   const { ctx, assign: A } = state, out = [];
-  const macs = machinesFor(ctx, j);
-  if (!macs.length) out.push(j.fixed ? `找不到指定機台 ${j.fixed}` : `沒有「${j.type}」類機台`);
-  else if (!macs.some(m => !macClash(ctx, m, j, A))) out.push('機台皆被占用：' + macs.map(m => `${m.id}（與 ${macClash(ctx, m, j, A).id} 衝突）`).join('、'));
+  const raw = machinesRaw(ctx, j), macs = machinesFor(ctx, j);
+  if (!raw.length) out.push(j.fixed ? `找不到指定機台 ${j.fixed}` : `沒有「${j.type}」類機台`);
+  else if (!macs.length) out.push(j.fixed ? `指定機台 ${j.fixed} 不能加工「${j.material}」材質` : `沒有可加工「${j.material}」材質的「${j.type}」機台`);
+  else if (!macs.some(m => !macBlocked(ctx, m, j, A))) out.push('機台無法使用：' + macs.map(m => { const c = macClash(ctx, m, j, A), d = macDown(m, j); return `${m.id}（${c ? '與 ' + c.id + ' 衝突' : '停機／' + d.reason + ' ' + fmtAbs(d.s) + '–' + fmtAbs(d.e)}）`; }).join('、'));
   const r = planSlots(j, ctx, busyIndex(A, { job: j.id }), {}, false, state.settings.ot);
-  if (r.fail) {
+  if (r.fail && r.fail.femp) {
+    const ne = (ctx.emps.find(e => e.id === j.femp) || {}).name || j.femp;
+    out.push(`指定人員 ${ne}（${j.femp}）無法參與：需具備「${j.type}」技能、在班、與其他工單無衝突且不超過每日工時上限`);
+  } else if (r.fail) {
     const sk = ctx.emps.filter(e => skillOk(e, j)).length;
     out.push(`第 ${r.fail.slot + 1} 位人員自 ${fmtAbs(r.fail.at)} 起無法接續（需「${j.type}」技能、在班或可加班、與其他工單無衝突、不超過每日 ${state.settings.cap} 小時，且與前一位重疊 ${state.settings.handover} 分鐘交接；具備技能共 ${sk} 人）`);
   }
@@ -540,8 +571,8 @@ function renderImport() {
   const view = {
     employees: [SAMPLE.employees.head, state.employees.map(e => [e.id, e.name, e.skills.join(';')])],
     shifts: [SAMPLE.shifts.head, state.shifts.map(s => [s.emp, s.date, s.type, fmt(s.start), fmt(s.end)])],
-    machines: [SAMPLE.machines.head, state.machines.map(m => [m.id, m.name, m.type])],
-    jobs: [SAMPLE.jobs.head, state.jobs.map(j => [j.id, j.name, j.type, j.fixed, j.date, fmt(j.start), j.edate, fmt(j.end), j.people, j.setup ?? '', j.prio])],
+    machines: [SAMPLE.machines.head, state.machines.map(m => [m.id, m.name, m.type, (m.materials || []).join(';')])],
+    jobs: [SAMPLE.jobs.head, state.jobs.map(j => [j.id, j.name, j.type, j.material || '', j.fixed, j.femp || '', j.date, fmt(j.start), j.edate, fmt(j.end), j.people, j.setup ?? '', j.prio])],
   };
   for (const kind of KINDS) {
     const box = $(`.file[data-kind="${kind}"]`), n = view[kind][1].length, st = $('.status', box);
@@ -554,12 +585,41 @@ function renderImport() {
   const ids = new Set(state.employees.map(e => e.id));
   const orphan = [...new Set(state.shifts.filter(s => !ids.has(s.emp)).map(s => s.emp))];
   if (state.employees.length && orphan.length) msgs.push(`班表中有 ${orphan.length} 個員編不在人員清單內：${orphan.join('、')}`);
+  dataChecks().forEach(t => msgs.push(t));
   $('#messages').innerHTML = msgs.map(t => `<div class="msg">${esc(t)}</div>`).join('');
-  renderSettings(); renderJobs();
+  renderSettings(); renderJobs(); renderDowntime();
   const ready = KINDS.every(k => state[k].length);
   $('#btnRun').disabled = !ready;
   $('#runHint').textContent = ready ? '' : '請先匯入四份資料，或按「載入範例資料」。';
 }
+/* 匯入後的資料健檢：先提醒會導致派不出去的資料問題 */
+function dataChecks() {
+  const out = [], skillSet = new Set(state.employees.flatMap(e => e.skills.map(nk))), macSet = new Set(state.machines.map(m => nk(m.type)));
+  if (state.employees.length && state.jobs.length) {
+    const noSkill = [...new Set(state.jobs.filter(j => !skillSet.has(nk(j.type))).map(j => j.type))];
+    if (noSkill.length) out.push(`工單的工種沒有任何人員具備此技能（請檢查是否打錯字）：${noSkill.join('、')}`);
+  }
+  if (state.machines.length && state.jobs.length) {
+    const noMac = [...new Set(state.jobs.filter(j => !j.fixed && !macSet.has(nk(j.type))).map(j => j.type))];
+    if (noMac.length) out.push(`工單的工種沒有對應的機台類型：${noMac.join('、')}`);
+    const ids = new Set(state.machines.map(m => m.id)), bad = state.jobs.filter(j => j.fixed && !ids.has(j.fixed));
+    if (bad.length) out.push(`指定機台不存在：${bad.map(j => j.id + '→' + j.fixed).join('、')}`);
+  }
+  const by = {};
+  state.shifts.forEach(s => (by[s.emp] = by[s.emp] || []).push(s));
+  const dup = Object.entries(by).filter(([, l]) => { l.sort((x, y) => x.s - y.s); return l.some((x, i) => i && x.s < l[i - 1].e); }).map(([k]) => k);
+  if (dup.length) out.push(`班表時段重疊的人員：${dup.join('、')}`);
+  if (state.employees.length && state.shifts.length) {
+    const has = new Set(state.shifts.map(s => s.emp)), none = state.employees.filter(e => !has.has(e.id)).map(e => e.id);
+    if (none.length) out.push(`沒有任何班表的人員：${none.join('、')}`);
+  }
+  const eids = new Set(state.employees.map(e => e.id)), bf = state.jobs.filter(j => j.femp && state.employees.length && !eids.has(j.femp));
+  if (bf.length) out.push(`指定人員不存在：${bf.map(j => j.id + '→' + j.femp).join('、')}`);
+  const mids = new Set(state.machines.map(m => m.id)), bd = state.downtime.filter(d => state.machines.length && !mids.has(d.machine));
+  if (bd.length) out.push(`停機時段的機台不存在：${[...new Set(bd.map(d => d.machine))].join('、')}`);
+  return out;
+}
+
 function renderSettings() {
   const s = state.settings;
   const mins = v => MINUTE_OPTS.includes(v) ? MINUTE_OPTS : [...MINUTE_OPTS, v].sort((a, b) => a - b);
@@ -589,22 +649,41 @@ function renderSettings() {
 function typeList() {
   return [...new Set([...TYPES, ...state.machines.map(m => m.type), ...state.employees.flatMap(e => e.skills), ...state.jobs.map(j => j.type)])];
 }
+function renderDowntime() {
+  const box = $('#dtRows'); if (!box) return;
+  if (!state.downtime.length) { box.innerHTML = '<p class="hint">目前沒有停機或維護時段。</p>'; return; }
+  const ms = state.machines.map(m => [m.id, `${m.id} ${m.name}`]);
+  const dt = m => `${isoOf(Math.floor(m / 60 / 24))}T${fmt(m % 1440)}`;
+  box.innerHTML = state.downtime.map((d, i) => {
+    const opts = ms.some(x => x[0] === d.machine) ? ms : [...ms, [d.machine, d.machine + '（無此機台）']];
+    return `<div class="brow">${sel({ 'data-i': i, 'data-f': 'machine' }, opts, d.machine)}` +
+      `<input type="datetime-local" data-i="${i}" data-f="s" value="${dt(d.s)}"> – <input type="datetime-local" data-i="${i}" data-f="e" value="${dt(d.e)}">` +
+      sel({ 'data-i': i, 'data-f': 'reason' }, ['維護', '異常', '保養', '其他'].map(x => [x, x]), d.reason) +
+      `<button data-i="${i}" data-f="del" class="ghost">刪除</button></div>`;
+  }).join('');
+}
 function renderJobs() {
   const box = $('#jobsTbl');
-  if (!state.jobs.length) { box.innerHTML = '<p class="hint" style="padding:10px">尚無工單。匯入後可在這裡用下拉選單調整人數、工種、機台與換線時間。</p>'; return; }
+  if (!state.jobs.length) { box.innerHTML = '<p class="hint" style="padding:10px">尚無工單。匯入後可在這裡用下拉選單調整人數、工種、材質、機台、指定人員與換線時間。</p>'; return; }
   const types = typeList().map(t => [t, t]);
+  const mats = [...new Set([...state.jobs.map(j => j.material), ...state.machines.flatMap(m => m.materials || [])].filter(Boolean))].map(x => [x, x]);
   const rows = state.jobs.map(j => {
     const macs = state.machines.filter(m => nk(m.type) === nk(j.type));
+    const emps = state.employees.filter(e => e.skills.some(s => nk(s) === nk(j.type)));
     const d = { 'data-job': j.id };
+    const matOpts = [['', '不限'], ...mats, ...(j.material && !mats.some(x => x[0] === j.material) ? [[j.material, j.material]] : [])];
+    const empOpts = [['', '自動'], ...emps.map(e => [e.id, `${e.name}（${e.id}）`]), ...(j.femp && !emps.some(e => e.id === j.femp) ? [[j.femp, j.femp + '（不符技能或不存在）']] : [])];
     return `<tr><td>${esc(j.id)}</td><td>${esc(j.name)}</td>` +
       `<td>${sel({ ...d, 'data-f': 'type' }, types, j.type)}</td>` +
+      `<td>${sel({ ...d, 'data-f': 'material' }, matOpts, j.material || '')}</td>` +
       `<td>${esc(jobRange(j))}<br><span class="hint">換線自 ${fmtAbs(wsOf(j)).slice(6)}（間接）；加工 ${hrs(j.e - j.s)}h（直接）</span></td>` +
       `<td>${sel({ ...d, 'data-f': 'people' }, [1, 2, 3, 4, 5, 6].map(n => [n, n + ' 人']), j.people)}</td>` +
       `<td>${sel({ ...d, 'data-f': 'fixed' }, [['', '自動選擇'], ...macs.map(m => [m.id, `${m.id} ${m.name}`]), ...(j.fixed && !macs.some(m => m.id === j.fixed) ? [[j.fixed, j.fixed + '（無此機台）']] : [])], j.fixed)}</td>` +
+      `<td>${sel({ ...d, 'data-f': 'femp' }, empOpts, j.femp || '')}</td>` +
       `<td>${sel({ ...d, 'data-f': 'setup' }, [['', `預設（${state.settings.setup} 分）`], ...MINUTE_OPTS.map(v => [v, v + ' 分'])], j.setup ?? '')}</td>` +
       `<td>${sel({ ...d, 'data-f': 'prio' }, [[3, '3 高'], [2, '2 中'], [1, '1 低']], j.prio)}</td></tr>`;
   }).join('');
-  box.innerHTML = `<table><thead><tr><th>工單</th><th>名稱</th><th>工種</th><th>加工時段</th><th>人數</th><th>機台</th><th>換線</th><th>優先序</th></tr></thead><tbody>${rows}</tbody></table>`;
+  box.innerHTML = `<table><thead><tr><th>工單</th><th>名稱</th><th>工種</th><th>材質</th><th>加工時段</th><th>人數</th><th>機台</th><th>指定人員</th><th>換線</th><th>優先序</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 /* ---------- 顯示：結果 ---------- */
@@ -620,7 +699,7 @@ function renderResults() {
     `<div class="stat ${total - ok ? 'bad' : ''}"><b>${total - ok}</b><span>未完成（無法派／人數不足）</span></div>` +
     `<div class="stat"><b>${total ? Math.round(ok / total * 100) : 0}%</b><span>完成率</span></div>` +
     `<div class="stat wide"><span>人員工時：直接 <b class="inl">${hrs(dir)}</b>h ＋ 間接（換線）<b class="inl">${hrs(ind)}</b>h ＋ 間接（其他工作）<b class="inl">${hrs(oth)}</b>h ＝ <b class="inl">${hrs(dir + ind + oth)}</b>h，其中加班 <b class="inl">${hrs(ot)}</b>h</span></div>`;
-  renderList(); renderGanttSel(); renderGantt(); renderLoad(); renderInd();
+  renderList(); renderGanttSel(); renderGantt(); renderLoad(); renderInd(); renderBoard(); updateUndo();
   $$('#stats .stat > b:not(.inl)').forEach(countUp);
 }
 
@@ -629,7 +708,7 @@ function renderList() {
   const jobs = [...state.jobs].sort((a, b) => a.s - b.s || a.id.localeCompare(b.id));
   const rows = jobs.map(j => {
     const a = A[j.id], st = statusOf(j);
-    const mopts = machinesFor(ctx, j).filter(m => m.id === a.machine || !macClash(ctx, m, j, A)).map(m => [m.id, `${m.id} ${m.name}`]);
+    const mopts = machinesFor(ctx, j).filter(m => m.id === a.machine || !macBlocked(ctx, m, j, A)).map(m => [m.id, `${m.id} ${m.name}`]);
     let people = '';
     for (let k = 0; k < j.people; k++) {
       const ch = a.slots[k];
@@ -644,61 +723,6 @@ function renderList() {
       `<td>${sel({ 'data-job': j.id, 'data-slot': 'm' }, [['', '— 未指派 —'], ...mopts], a.machine || '')}</td><td>${people}</td><td>${note}</td></tr>`;
   }).join('');
   $('#tab-list').innerHTML = (state.repair.notes.length ? `<p class="hint">補派：${state.repair.notes.map(esc).join('；')}</p>` : '') + `<p class="hint">「人員」欄是接力鏈：A → B 表示 A 做到班別結束（必要時加班），B 提前 ${state.settings.handover} 分鐘到場交接。人員時段從「換線開始」算起（換線為間接工時，之後機台加工為直接工時）。淡橘色＝未補齊，紅色＝完全未派。</p><div class="tblwrap"><table><thead><tr><th>工單</th><th>名稱</th><th>工種</th><th>加工時段</th><th>優先</th><th>人數</th><th>機台</th><th>人員（接力）</th><th>備註</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-}
-
-function renderGanttSel() {
-  const days = new Set();
-  state.jobs.forEach(j => { for (let d = Math.floor(wsOf(j) / 1440); d <= Math.floor((j.e - 1) / 1440); d++) days.add(d); });
-  state.shifts.forEach(s => { for (let d = Math.floor(s.s / 1440); d <= Math.floor((s.e - 1) / 1440); d++) days.add(d); });
-  const dates = [...days].sort((a, b) => a - b).map(isoOf);
-  if (!dates.includes(state.gDate)) state.gDate = dates[0];
-  $('#ganttDate').innerHTML = dates.map(d => `<option${d === state.gDate ? ' selected' : ''}>${d}</option>`).join('');
-}
-function renderGantt() {
-  const { ctx, assign: A } = state, d0 = dayNum(state.gDate) * 1440, d1 = d0 + 1440;
-  const clip = (s, e) => { const a = Math.max(s, d0), b = Math.min(e, d1); return b > a ? [a - d0, b - d0] : null; };
-  const segs = [];
-  state.shifts.forEach(s => { const c = clip(s.s, s.e); if (c) segs.push(c); });
-  state.jobs.forEach(j => { const c = clip(wsOf(j), j.e); if (c) segs.push(c); });
-  let lo = segs.length ? Math.floor(Math.min(...segs.map(c => c[0])) / 60) * 60 : 480;
-  let hi = segs.length ? Math.ceil(Math.max(...segs.map(c => c[1])) / 60) * 60 : 1080;
-  if (hi - lo < 360) hi = lo + 360;
-  const pct = m => ((m - lo) / (hi - lo) * 100);
-  const w = c => `left:${pct(c[0]).toFixed(2)}%;width:${(pct(c[1]) - pct(c[0])).toFixed(2)}%`;
-  const box = (c, cls) => `<div class="${cls}" style="${w(c)}"></div>`;
-  const step = (hi - lo) > 720 ? 120 : 60;
-  let ticks = '', lines = '';
-  for (let m = lo; m <= hi; m += step) { ticks += `<span style="left:${pct(m).toFixed(2)}%">${fmt(m % 1440).slice(0, 2)}</span>`; lines += `<i class="gridline" style="left:${pct(m).toFixed(2)}%"></i>`; }
-  const run = (j, c, title) => `<div class="gjob p${j.prio}" style="${w(c)}" title="${esc(title)}">${esc(j.id.replace(/^WO-?/i, ''))} ${esc(j.name)}</div>`;
-  const setup = (j, c, title) => `<div class="gsetup" style="${w(c)}" title="${esc(title)}"></div>`;
-  /* 把 [a,b] 依加工開始時間拆成換線（間接）與加工（直接）兩塊 */
-  const parts = (j, a, b, title) => {
-    let h = '';
-    const i = a < j.s ? clip(a, Math.min(b, j.s)) : null, d = b > j.s ? clip(Math.max(a, j.s), b) : null;
-    if (i) h += setup(j, i, title + '（換線・間接工時）');
-    if (d) h += run(j, d, title);
-    return h;
-  };
-  let rows;
-  if (state.gView === 'emp') {
-    rows = ctx.emps.map(e => {
-      const sh = ctx.shiftsBy[e.id].map(s => box(clip(s.s, s.e) || [0, 0], clip(s.s, s.e) ? 'gshift' : 'hide')).join('');
-      const ot = ctx.shiftsBy[e.id].filter(s => s.xe > s.e).map(s => clip(s.e, s.xe)).filter(Boolean).map(c => box(c, 'gshift got')).join('');
-      const br = ctx.shiftsBy[e.id].flatMap(s => s.brk).map(x => clip(x[0], x[1])).filter(Boolean).map(c => box(c, 'glunch')).join('');
-      const jb = state.jobs.flatMap(j => A[j.id].slots.flat().filter(g => g && g.emp === e.id).map(g => parts(j, g.a, g.b, `${j.id} ${j.name}\n${segTxt(j, g)}`))).join('');
-      const ib = state.indir.filter(x => x.emp === e.id).map(x => [x, clip(x.a, x.b)]).filter(x => x[1])
-        .map(([x, c]) => `<div class="gind" style="${w(c)}" title="${esc(x.task + '\n' + fmt(x.a % 1440) + '–' + fmt(x.b % 1440))}">${esc(x.task)}</div>`).join('');
-      return `<div class="grow"><div class="glabel" title="${esc(e.skills.join('、'))}">${esc(e.name)}</div><div class="track">${lines}${ot}${sh}${br}${ib}${jb}</div></div>`;
-    }).join('');
-  } else {
-    rows = ctx.machines.map(m => {
-      const jb = state.jobs.filter(j => A[j.id].machine === m.id).map(j => parts(j, wsOf(j), j.e, `${j.id} ${j.name}\n${jobRange(j)}`)).join('');
-      return `<div class="grow"><div class="glabel" title="${esc(m.name)}">${esc(m.id)}</div><div class="track">${lines}${jb}</div></div>`;
-    }).join('');
-  }
-  $('#gantt').innerHTML = `<div class="gaxis">${ticks}</div>${rows}`;
-  const un = state.jobs.filter(j => statusOf(j) !== 'ok' && clip(wsOf(j), j.e));
-  $('#ganttUn').innerHTML = un.length ? `<p class="hint">本日未完成：${un.map(j => `<span class="chip">${esc(j.id)} ${esc(j.name)}</span>`).join('')}</p>` : '';
 }
 
 function renderLoad() {
@@ -730,6 +754,8 @@ function renderInd() {
     `<div class="tblwrap"><table><thead><tr><th>員編</th><th>姓名</th><th>間接工作</th><th>時段</th><th>時數</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+function pushHistory() { state.history.push(JSON.stringify(state.assign)); if (state.history.length > 50) state.history.shift(); }
+
 /* ---------- 事件 ---------- */
 function applySample() {
   for (const kind of KINDS) {
@@ -737,11 +763,13 @@ function applySample() {
     const r = build(kind, [head, ...rows.map(r => r.map(String))]);
     state[kind] = r.items; state.warn[kind] = r.warn;
   }
+  { const r = build('downtime', [SAMPLE.downtime.head, ...SAMPLE.downtime.rows.map(r => r.map(String))]); state.downtime = r.items; }
   state.settings = defaults();
   invalidate(); save(); renderImport();
 }
 function clearAll() {
   KINDS.forEach(k => { state[k] = []; state.warn[k] = []; });
+  state.downtime = [];
   invalidate(); save(); renderImport();
 }
 
@@ -767,8 +795,33 @@ $$('.file').forEach(box => {
 });
 
 $('#btnSample').addEventListener('click', applySample);
+$('#btnBackup').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({ app: 'cnc-dispatch', v: 5, e: state.employees, s: state.shifts, m: state.machines, j: state.jobs, d: state.downtime, c: state.settings })], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '派工專案備份.json';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+$('#fileRestore').addEventListener('change', async ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    if (d.app !== 'cnc-dispatch' || !Array.isArray(d.e) || !Array.isArray(d.j)) throw new Error('不是本系統匯出的備份檔');
+    const df = defaults(), c = d.c || {};
+    state.employees = d.e; state.shifts = d.s || []; state.machines = d.m || []; state.jobs = d.j; state.downtime = d.d || [];
+    state.settings = { ...df, ...c, breaks: { ...df.breaks, ...(c.breaks || {}) }, indirect: Array.isArray(c.indirect) ? c.indirect : df.indirect };
+    KINDS.forEach(k => { state.warn[k] = []; });
+    invalidate(); save(); renderImport();
+  } catch (e) { alert('還原失敗：' + e.message); }
+  ev.target.value = '';
+});
+$$('.nav nav a').forEach(a => a.addEventListener('click', ev => {
+  if (a.getAttribute('href') === '#results' && $('#results').hidden) { ev.preventDefault(); $('#rules').scrollIntoView({ behavior: 'smooth' }); }
+}));
 $('#btnClear').addEventListener('click', clearAll);
-$('#btnRun').addEventListener('click', () => { runDispatch(); renderResults(); $('#results').scrollIntoView({ behavior: 'smooth' }); });
+$('#btnRun').addEventListener('click', () => {
+  runDispatch(); renderResults();
+  $('.tabs button[data-tab="board"]').click();
+  $('#results').scrollIntoView({ behavior: 'smooth' });
+});
 
 $('#setSetup').addEventListener('change', ev => { state.settings.setup = +ev.target.value; settingsChanged(); });
 $('#setHandover').addEventListener('change', ev => { state.settings.handover = +ev.target.value; settingsChanged(); });
@@ -797,7 +850,9 @@ function settingsChanged() { invalidate(); save(); renderJobs(); }
 $('#jobsTbl').addEventListener('change', ev => {
   const t = ev.target, j = state.jobs.find(x => x.id === t.dataset.job); if (!j) return;
   const f = t.dataset.f, v = t.value;
-  if (f === 'type') { j.type = v; j.fixed = ''; }
+  if (f === 'type') { j.type = v; j.fixed = ''; j.femp = ''; }
+  else if (f === 'material') j.material = v;
+  else if (f === 'femp') j.femp = v;
   else if (f === 'people') j.people = +v;
   else if (f === 'fixed') j.fixed = v;
   else if (f === 'setup') j.setup = v === '' ? null : +v;
@@ -808,6 +863,8 @@ $('#jobsTbl').addEventListener('change', ev => {
 $('#tab-list').addEventListener('change', ev => {
   const t = ev.target, j = state.jobs.find(x => x.id === t.dataset.job); if (!j) return;
   const a = state.assign[j.id], v = t.value, slot = t.dataset.slot;
+  if (v === 'keep') return;
+  pushHistory();
   if (slot === 'm') a.machine = v || null;
   else if (v === 'clear') a.slots[+slot] = null;
   else if (v.startsWith('p:')) a.slots[+slot] = [{ emp: v.slice(2), a: wsOf(j), b: j.e }];

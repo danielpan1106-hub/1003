@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="CNC 智慧派工系統：依人員技能、班表、機台占用、換線與交接時間自動派工，支援跨班接力與間接工作安排。">
+<meta name="theme-color" content="#007c72">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23007c72' stroke-width='6' stroke-dasharray='48 20'/%3E%3C/svg%3E">
 <title>CNC 智慧派工系統</title>
 <script>document.documentElement.classList.add("js")</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -22,7 +25,7 @@
     <div class="herotxt">
       <p class="eyebrow">AEROSPACE CNC SCHEDULING</p>
       <h1>CNC 智慧派工系統</h1>
-      <p class="lead">依人員技能、班表、機台占用、換線與交接時間，自動篩選人員與機台並派工；長工單可跨班接力，空檔自動安排間接工作。</p>
+      <p class="lead">依人員技能、班表、機台占用、換線與交接時間，自動篩選人員與機台並派工；長工單可跨班接力，空檔自動安排間接工作，並以 CNC 燈號（藍、黃、綠、紅）即時呈現機台戰勤。</p>
       <div class="cta">
         <a class="btn primary" href="#import">開始派工</a>
         <a class="btn" href="#rules">查看排程規則</a>
@@ -34,6 +37,7 @@
     <div><b>技能比對</b><span>八種工種與機台類型，只派給符合技能的人</span></div>
     <div><b>班表與接力</b><span>早、中、夜班各自休息時間，跨班接力、必要時加班</span></div>
     <div><b>直接與間接工時</b><span>換線與保養、維護等間接工作分開統計</span></div>
+    <div><b>戰勤燈號</b><span>藍待料、黃完工、綠生產中、紅異常維護，並顯示操作人員</span></div>
   </div>
 </section>
 
@@ -43,6 +47,8 @@
       <h2>① 匯入資料（CSV）</h2>
       <div class="actions">
         <button id="btnSample" class="primary">載入範例資料</button>
+        <button id="btnBackup">備份專案</button>
+        <label class="filebtn">還原備份<input type="file" id="fileRestore" accept=".json,application/json" hidden></label>
         <button id="btnClear" class="ghost">清除全部</button>
       </div>
     </div>
@@ -100,6 +106,10 @@
       <label><input type="checkbox" id="optPrio" checked> 優先序高的工單先派（1–3，數字越大越優先）</label>
       <label><input type="checkbox" id="optMulti" checked> 工時相同時，優先派技能較少的人（保留多技能人員應付難案）</label>
     </div>
+    <details class="ind" open><summary>機台停機／維護時段（這段時間機台不會被派工，戰勤表顯示紅燈）</summary>
+      <div id="dtRows"></div>
+      <div class="actions"><button id="btnDtAdd">＋ 新增停機時段</button><label class="filebtn">匯入停機 CSV<input type="file" id="fileDt" accept=".csv,text/csv" hidden></label><a href="#" id="tplDt" class="tpl">下載範本</a></div>
+    </details>
     <div class="tblwrap jobsbox" id="jobsTbl"></div>
     <div class="runrow">
       <button id="btnRun" class="primary big" disabled>自動派工</button>
@@ -110,23 +120,39 @@
   <section class="card" id="results" hidden>
     <div class="head">
       <h2>③ 派工結果</h2>
-      <div class="actions"><button id="btnExport">匯出結果 CSV</button><button id="btnExport2">匯出人員明細 CSV</button></div>
+      <div class="actions"><button id="btnUndo" disabled>↶ 復原上一步</button><button id="btnResetAuto" disabled>還原為自動結果</button><button id="btnExport">匯出結果 CSV</button><button id="btnExport2">匯出人員明細 CSV</button></div>
     </div>
     <div class="stats" id="stats"></div>
     <div class="tabs">
-      <button data-tab="list" class="on">派工清單</button>
+      <button data-tab="board" class="on">戰勤表</button>
+      <button data-tab="list">派工清單</button>
       <button data-tab="gantt">時間軸</button>
       <button data-tab="ind">間接工作</button>
       <button data-tab="load">人員／機台負荷</button>
     </div>
-    <div class="tab" id="tab-list"></div>
+    <div class="tab" id="tab-board">
+      <div class="bctl">
+        <label>時間 <input type="datetime-local" id="boardT"></label>
+        <button id="boardStart" title="跳到最早">⏮</button>
+        <input type="range" id="boardRange" aria-label="時間軸拉桿">
+        <button id="boardEnd" title="跳到最晚">⏭</button>
+        <button id="boardPlay">▶ 播放</button>
+      </div>
+      <div class="bsums" id="boardSum"></div>
+      <div id="boardMachines"></div>
+      <h3>人員動態</h3>
+      <div class="pgrid" id="boardPeople"></div>
+      <p class="hint">燈號：<span class="lampdot green"></span>綠＝生產中　<span class="lampdot blue"></span>藍＝待料（含換線中）　<span class="lampdot yellow"></span>黃＝完工　<span class="lampdot red"></span>紅＝異常、機台維護（或加工中無人看守）　<span class="lampdot gray"></span>灰＝無排程。拖曳拉桿或按「播放」可看各時間點的機台與人員狀態。</p>
+    </div>
+    <div class="tab" id="tab-list" hidden></div>
     <div class="tab" id="tab-gantt" hidden>
       <div class="gbar">
         <span>
           <label>日期 <select id="ganttDate"></select></label>
           <label>檢視 <select id="ganttView"><option value="emp">依人員</option><option value="mac">依機台</option></select></label>
         </span>
-        <span class="legend"><i class="lg shift"></i>上班 <i class="lg lunch"></i>休息 <i class="lg ot"></i>可加班 <i class="lg setup"></i>換線（間接） <i class="lg ind"></i>間接工作 <i class="lg p3"></i>優先3 <i class="lg p2"></i>優先2 <i class="lg p1"></i>優先1</span>
+        <span><button id="btnGanttPng">匯出圖片 (PNG)</button></span>
+        <span class="legend"><i class="lg shift"></i>上班 <i class="lg lunch"></i>休息 <i class="lg ot"></i>可加班 <i class="lg setup"></i>換線（間接） <i class="lg ind"></i>間接工作 <i class="lg down"></i>停機 <i class="lg p3"></i>優先3 <i class="lg p2"></i>優先2 <i class="lg p1"></i>優先1</span>
       </div>
       <div id="gantt"></div>
       <div id="ganttUn"></div>
@@ -134,9 +160,34 @@
     <div class="tab" id="tab-ind" hidden></div>
     <div class="tab" id="tab-load" hidden></div>
   </section>
+
+  <section class="card help" id="help">
+    <div class="head"><h2>使用說明與派工規則</h2></div>
+    <details><summary>怎麼用（四步驟）</summary>
+      <ol><li>下載四份範本（人員、班表、機台、工單），用 Excel 填好後另存成 CSV UTF-8。</li>
+      <li>匯入四份檔案；資料有問題時，上方會出現紅色提醒。</li>
+      <li>在「排程規則」設定各班休息、換線、交接、工時上限與間接工作，並用下拉選單微調每張工單。</li>
+      <li>按「自動派工」，在結果區查看清單、時間軸與負荷；可手動改派、匯出 CSV。資料可用「備份專案」另存。</li></ol>
+    </details>
+    <details><summary>派工規則</summary>
+      <ul><li>人員必須具備工單的工種技能，且工單時段（含換線）落在其班別內，與其他工單無衝突、保留交接時間。</li>
+      <li>機台同一時間只做一件；每張工單前有換線時間，機台此時也被占用。</li>
+      <li>換線是間接工時，機台加工中是直接工時；休息時間不計人員工時，機台照常運轉。</li>
+      <li>長工單可跨班、跨日：由不同班別的人接力，後一位提前「交接時間」到場；班別之間有空檔時，在不超過每日工時上限下讓前一位加班。</li>
+      <li>先照優先序與難度排，排不出來的再嘗試調整其他工單的人員補派；仍排不出來會標示原因，不硬排。</li>
+      <li>機台停機時段、材質限制、指定機台與指定人員都會被遵守；做不到會在備註寫出原因。</li>
+      <li>戰勤表依時間點顯示每台機台的燈號：綠＝生產中、藍＝待料（含換線）、黃＝完工、紅＝異常或維護，並標出目前的操作人員。</li>
+      <li>排完工單的空檔，會自動安排間接工作（刀具準備、機台保養、設備維護等）。</li></ul>
+    </details>
+    <details><summary>CSV 欄位</summary>
+      <ul><li>人員：員編, 姓名, 技能（用 ; 分隔）</li><li>班表：員編, 日期, 班別, 上班, 下班（下班早於上班視為跨日）</li><li>機台：機台編號, 機台名稱, 類型, 可加工材質（選填，空白＝不限）</li><li>停機：機台編號, 開始日期, 開始, 結束日期, 結束, 原因（維護／異常／保養）</li><li>工單：工單, 名稱, 工種, 材質（選填）, 指定機台（選填）, 指定人員（選填員編）, 日期, 開始, 結束日期（跨日才填）, 結束, 人數, 換線(分), 優先序（1–3）</li></ul>
+      <p class="hint">支援逗號、分號、Tab 分隔，UTF-8 或 Big5 編碼；日期 2026-10-05 或 2026/10/5，時間 8:30 或 08:30 皆可。</p>
+    </details>
+  </section>
 </main>
 
 <footer class="wrap foot">資料只在你的瀏覽器內處理，不會上傳到任何伺服器。</footer>
 <script src="app.js"></script>
+<script src="features.js"></script>
 </body>
 </html>
